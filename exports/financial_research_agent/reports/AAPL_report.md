@@ -51,7 +51,7 @@
 
 **Investment Recommendation (qualitative)**  
 - **Buy/Hold** – For investors seeking exposure to a market‑leader with solid cash flow and a diversified revenue mix, Apple remains a compelling holding. The positive sentiment and pipeline upside outweigh the modest near‑term supply‑chain risks.  
-- **Target Price Outlook (12‑month):** Approximately **$215–$230**, assuming continued Services growth and successful launch of the upcoming hardware refresh.
+
 
 ---
 
