@@ -1,0 +1,156 @@
+"""Agent graph construction for Financial Research Agent."""
+
+from pathlib import Path
+
+from framework.graph import EdgeSpec, EdgeCondition, Goal, SuccessCriterion, Constraint
+from framework.graph.edge import GraphSpec
+from framework.graph.executor import ExecutionResult
+from framework.graph.checkpoint_config import CheckpointConfig
+from framework.llm import LiteLLMProvider
+from framework.runner.tool_registry import ToolRegistry
+from framework.runtime.agent_runtime import AgentRuntime, create_agent_runtime
+from framework.runtime.execution_stream import EntryPointSpec
+
+from .config import default_config, metadata
+from .nodes import intake_node, researcher_node, analyst_node
+
+# Goal definition
+goal = Goal(
+    id="financial-research-goal",
+    name="Financial Research",
+    description="Gather stock data, news, and sentiment to generate investment reports.",
+    success_criteria=[
+        SuccessCriterion(id="sc-1", description="Report generated for target ticker", metric="completion", target="1", weight=0.4),
+        SuccessCriterion(id="sc-2", description="Recent news and sentiment included", metric="data_completeness", target="1", weight=0.6),
+    ],
+    constraints=[
+        Constraint(id="c-1", description="News analysis must use a 7-day window", constraint_type="hard", category="quality"),
+    ],
+)
+
+# Node list
+nodes = [intake_node, researcher_node, analyst_node]
+
+# Edge definitions
+edges = [
+    EdgeSpec(id="intake-to-researcher", source="intake", target="researcher",
+             condition=EdgeCondition.ON_SUCCESS, priority=1),
+    EdgeSpec(id="researcher-to-analyst", source="researcher", target="analyst",
+             condition=EdgeCondition.ON_SUCCESS, priority=1),
+    # Loop back for next ticker
+    EdgeSpec(id="analyst-to-intake", source="analyst", target="intake",
+             condition=EdgeCondition.ON_SUCCESS, priority=1),
+]
+
+# Graph configuration
+entry_node = "intake"
+entry_points = {"start": "intake"}
+pause_nodes = []
+terminal_nodes = []  # Forever-alive
+
+# Module-level vars read by AgentRunner.load()
+conversation_mode = "continuous"
+identity_prompt = "You are an expert financial research agent. You provide objective analysis based on recent news and sentiment data."
+loop_config = {"max_iterations": 100, "max_tool_calls_per_turn": 30, "max_history_tokens": 32000}
+
+
+class FinancialResearchAgent:
+    def __init__(self, config=None):
+        self.config = config or default_config
+        self.goal = goal
+        self.nodes = nodes
+        self.edges = edges
+        self.entry_node = entry_node
+        self.entry_points = entry_points
+        self.pause_nodes = pause_nodes
+        self.terminal_nodes = terminal_nodes
+        self._graph = None
+        self._agent_runtime = None
+        self._tool_registry = None
+        self._storage_path = None
+
+    def _build_graph(self):
+        return GraphSpec(
+            id="financial-research-graph",
+            goal_id=self.goal.id,
+            version="1.0.0",
+            entry_node=self.entry_node,
+            entry_points=self.entry_points,
+            terminal_nodes=self.terminal_nodes,
+            pause_nodes=self.pause_nodes,
+            nodes=self.nodes,
+            edges=self.edges,
+            default_model=self.config.model,
+            max_tokens=self.config.max_tokens,
+            loop_config=loop_config,
+            conversation_mode=conversation_mode,
+            identity_prompt=identity_prompt,
+        )
+
+    def _setup(self):
+        self._storage_path = Path.home() / ".hive" / "agents" / "financial_research_agent"
+        self._storage_path.mkdir(parents=True, exist_ok=True)
+        self._tool_registry = ToolRegistry()
+        mcp_config = Path(__file__).parent / "mcp_servers.json"
+        if mcp_config.exists():
+            self._tool_registry.load_mcp_config(mcp_config)
+        
+        llm = LiteLLMProvider(model=self.config.model, api_key=self.config.api_key, api_base=self.config.api_base)
+        tools = list(self._tool_registry.get_tools().values())
+        tool_executor = self._tool_registry.get_executor()
+        self._graph = self._build_graph()
+        self._agent_runtime = create_agent_runtime(
+            graph=self._graph, goal=self.goal, storage_path=self._storage_path,
+            entry_points=[EntryPointSpec(id="start", name="Start", entry_node=self.entry_node,
+                                         trigger_type="manual", isolation_level="shared")],
+            llm=llm, tools=tools, tool_executor=tool_executor,
+            checkpoint_config=CheckpointConfig(enabled=True, checkpoint_on_node_complete=True,
+                                                checkpoint_max_age_days=7, async_checkpoint=True),
+        )
+
+    async def start(self):
+        if self._agent_runtime is None:
+            self._setup()
+        if not self._agent_runtime.is_running:
+            await self._agent_runtime.start()
+
+    async def stop(self):
+        if self._agent_runtime and self._agent_runtime.is_running:
+            await self._agent_runtime.stop()
+        self._agent_runtime = None
+
+    async def trigger_and_wait(self, entry_point="start", input_data=None, timeout=None, session_state=None):
+        if self._agent_runtime is None:
+            raise RuntimeError("Agent not started. Call start() first.")
+        return await self._agent_runtime.trigger_and_wait(
+            entry_point_id=entry_point, input_data=input_data or {}, session_state=session_state)
+
+    async def run(self, context, session_state=None):
+        await self.start()
+        try:
+            result = await self.trigger_and_wait("start", context, session_state=session_state)
+            return result or ExecutionResult(success=False, error="Execution timeout")
+        finally:
+            await self.stop()
+
+    def info(self):
+        return {
+            "name": metadata.name, "version": metadata.version, "description": metadata.description,
+            "goal": {"name": self.goal.name, "description": self.goal.description},
+            "nodes": [n.id for n in self.nodes], "edges": [e.id for e in self.edges],
+            "entry_node": self.entry_node, "entry_points": self.entry_points,
+            "terminal_nodes": self.terminal_nodes,
+            "client_facing_nodes": [n.id for n in self.nodes if n.client_facing],
+        }
+
+    def validate(self):
+        errors, warnings = [], []
+        node_ids = {n.id for n in self.nodes}
+        for e in self.edges:
+            if e.source not in node_ids: errors.append(f"Edge {e.id}: source '{e.source}' not found")
+            if e.target not in node_ids: errors.append(f"Edge {e.id}: target '{e.target}' not found")
+        if self.entry_node not in node_ids: errors.append(f"Entry node '{self.entry_node}' not found")
+        return {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
+
+
+default_agent = FinancialResearchAgent()
