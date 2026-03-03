@@ -1,0 +1,4 @@
+{
+  "ticker": "string (e.g., 'AAPL')",
+  "analysis_window_days": "integer (default: 7)"
+}

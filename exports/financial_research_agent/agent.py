@@ -50,7 +50,7 @@ terminal_nodes = []  # Forever-alive
 
 # Module-level vars read by AgentRunner.load()
 conversation_mode = "continuous"
-identity_prompt = "You are an expert financial research agent. You provide objective analysis based on recent news and sentiment data."
+identity_prompt = "You are a concise financial research agent. Provide clear, data-driven analysis with minimal fluff."
 loop_config = {"max_iterations": 100, "max_tool_calls_per_turn": 30, "max_history_tokens": 32000}
 
 
